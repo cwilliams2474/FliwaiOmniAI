@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.py[cod]
+node_modules/
+.next/
+uploads/
+*.db
+.DS_Store
+
+# Runtime secret files
+secrets/*
+!secrets/README.md
+playwright-report/
+test-results/
+backups/
