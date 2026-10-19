@@ -69,13 +69,21 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
-      - run: npm install --no-audit --no-fund
+      - name: Install
+        run: npm install --no-audit --no-fund > install.log 2>&1
       - name: Type check
-        run: npx tsc --noEmit 2>&1 | tee tsc.txt; s=${PIPESTATUS[0]}; grep -E "error TS" tsc.txt | head -40 | sed 's/^/::error title=tsc::/'; exit $s
-        shell: bash
+        run: npx tsc --noEmit > tsc.log 2>&1
       - name: Build
-        run: npm run build 2>&1 | tee build.txt; s=${PIPESTATUS[0]}; if [ $s -ne 0 ]; then tail -40 build.txt | sed 's/^/::error title=next build::/'; fi; exit $s
+        run: npm run build > build.log 2>&1
+      - name: Report failures as annotations
+        if: failure()
         shell: bash
+        run: |
+          for f in install.log tsc.log build.log; do
+            [ -s "$f" ] || continue
+            body=$(tail -c 3500 "$f" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=$f::$body"
+          done
 
   scripts:
     runs-on: ubuntu-latest
