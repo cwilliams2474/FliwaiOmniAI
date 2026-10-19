@@ -1,59 +1,18 @@
 #!/usr/bin/env bash
+# Verify a backup folder: checksums match and both archives are readable.
+# Usage: scripts/verify-backup.sh backups/20261017-020000
 set -euo pipefail
+dir=${1:?Usage: verify-backup.sh <backup-folder>}
+[[ -f "$dir/SHA256SUMS" ]] || { echo "FAIL: $dir has no SHA256SUMS file."; exit 1; }
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 <backup-directory>" >&2
-  exit 2
-fi
+(cd "$dir" && sha256sum --check --quiet SHA256SUMS) || { echo "FAIL: checksum mismatch in $dir. Do not restore from it."; exit 1; }
+echo "OK: checksums match"
 
-BACKUP_DIR="$1"
-python3 - "$BACKUP_DIR" <<'PY'
-import hashlib
-import json
-import sys
-from pathlib import Path
+tar -tzf "$dir/uploads.tar.gz" >/dev/null || { echo "FAIL: uploads.tar.gz is not a readable archive."; exit 1; }
+echo "OK: uploads archive readable ($(tar -tzf "$dir/uploads.tar.gz" | grep -vc '/$') files)"
 
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open('rb') as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-root = Path(sys.argv[1]).resolve()
-manifest_path = root / 'manifest.json'
-if not manifest_path.is_file():
-    raise SystemExit(f'manifest.json not found in {root}')
-manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-if manifest.get('format_version') != 1:
-    raise SystemExit('Unsupported backup format version')
-
-def safe_child(base: Path, rel: str) -> Path:
-    candidate = (base / rel).resolve()
-    try:
-        candidate.relative_to(base.resolve())
-    except ValueError as exc:
-        raise SystemExit(f'Unsafe manifest path: {rel}') from exc
-    return candidate
-
-
-db_path = safe_child(root, manifest['database_file'])
-uploads_dir = safe_child(root, manifest['uploads_directory'])
-if not db_path.is_file():
-    raise SystemExit(f'Database backup missing: {db_path}')
-if db_path.stat().st_size < 100:
-    raise SystemExit('Database backup is unexpectedly small')
-if sha256(db_path) != manifest['database_sha256']:
-    raise SystemExit('Database checksum mismatch')
-if not uploads_dir.is_dir():
-    raise SystemExit(f'Uploads directory missing: {uploads_dir}')
-for item in manifest.get('uploads', []):
-    path = safe_child(uploads_dir, item['path'])
-    if not path.is_file():
-        raise SystemExit(f"Upload backup missing: {item['path']}")
-    if sha256(path) != item['sha256']:
-        raise SystemExit(f"Upload checksum mismatch: {item['path']}")
-print(f'Backup verification passed: {root}')
-PY
+# Read the dump's table of contents with the same Postgres version the app uses.
+docker run --rm -i postgres:16-alpine pg_restore --list < "$dir/database.dump" >/dev/null \
+  || { echo "FAIL: database.dump can't be read by pg_restore."; exit 1; }
+echo "OK: database dump readable"
+echo "VERIFIED: $dir"

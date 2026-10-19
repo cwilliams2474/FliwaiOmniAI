@@ -1,46 +1,62 @@
-import os
-from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _csv(value: str) -> list[str]:
-    return [item.strip() for item in value.split(',') if item.strip()]
+class Settings(BaseSettings):
+    """All runtime configuration comes from environment variables (see .env.example)."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    app_name: str = "OmniAI"
+    environment: str = "production"  # production | development | test
+    public_url: str = "http://localhost"
+
+    database_url: str = "postgresql+psycopg://omniai:omniai@db:5432/omniai"
+
+    # Signing key for session tokens. Must be long and random in production.
+    secret_key: str = Field(default="change-me", min_length=8)
+    # Separate key for encrypting stored secrets (integration credentials, MFA seeds).
+    # Generate with: python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
+    encryption_key: str = ""
+
+    session_hours: int = 12
+    cookie_secure: bool = True
+    login_max_attempts: int = 5
+    login_window_seconds: int = 300
+
+    upload_dir: Path = Path("/data/uploads")
+    max_upload_mb: int = 25
+
+    # AI provider: "openai" (any OpenAI-compatible API, incl. Ollama / vLLM / LM Studio),
+    # "anthropic", or "none" (search-only answers, no model calls).
+    ai_provider: str = "none"
+    ai_base_url: str = "https://api.openai.com/v1"
+    ai_api_key: str = ""
+    ai_model: str = "gpt-4o-mini"
+    ai_max_tokens: int = 1200
+    ai_timeout_seconds: int = 90
+
+    # Scheduled workflows. Cron times are read in this time zone.
+    scheduler_enabled: bool = True
+    scheduler_timezone: str = "America/New_York"
+    scheduler_interval_seconds: int = 30
+
+    # Optional SMTP for password reset emails. If unset, reset links are written to the server log.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "omniai@localhost"
+    smtp_starttls: bool = True
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
 
 
-@dataclass(frozen=True)
-class Settings:
-    app_name: str = os.getenv('APP_NAME', 'FLIWAI OmniAI API')
-    environment: str = os.getenv('ENVIRONMENT', 'development')
-    database_url: str = os.getenv('DATABASE_URL', 'sqlite:///./omniai.db')
-    jwt_secret: str = os.getenv('JWT_SECRET', 'change_this_secret')
-    jwt_expire_minutes: int = int(os.getenv('JWT_EXPIRE_MINUTES', '480'))
-    openai_api_key: str = os.getenv('OPENAI_API_KEY', '')
-    openai_model: str = os.getenv('OPENAI_MODEL', 'gpt-5.6-luna')
-    openai_code_model: str = os.getenv('OPENAI_CODE_MODEL', 'gpt-5.3-codex')
-    upload_dir: str = os.getenv('UPLOAD_DIR', '/app/uploads')
-    rate_limit_per_minute: int = int(os.getenv('RATE_LIMIT_PER_MINUTE', '120'))
-    app_base_url: str = os.getenv('APP_BASE_URL', 'http://localhost:3000')
-    smtp_host: str = os.getenv('SMTP_HOST', '')
-    smtp_port: int = int(os.getenv('SMTP_PORT', '587'))
-    smtp_username: str = os.getenv('SMTP_USERNAME', '')
-    smtp_password: str = os.getenv('SMTP_PASSWORD', '')
-    smtp_from: str = os.getenv('SMTP_FROM', 'no-reply@localhost')
-    smtp_starttls: bool = os.getenv('SMTP_STARTTLS', 'true').lower() == 'true'
-    stripe_secret_key: str = os.getenv('STRIPE_SECRET_KEY', '')
-    stripe_webhook_secret: str = os.getenv('STRIPE_WEBHOOK_SECRET', '')
-    stripe_price_starter: str = os.getenv('STRIPE_PRICE_STARTER', '')
-    stripe_price_professional: str = os.getenv('STRIPE_PRICE_PROFESSIONAL', '')
-    stripe_price_enterprise: str = os.getenv('STRIPE_PRICE_ENTERPRISE', '')
-    oidc_issuer: str = os.getenv('OIDC_ISSUER', '').rstrip('/')
-    oidc_client_id: str = os.getenv('OIDC_CLIENT_ID', '')
-    oidc_client_secret: str = os.getenv('OIDC_CLIENT_SECRET', '')
-    oidc_redirect_uri: str = os.getenv('OIDC_REDIRECT_URI', 'http://localhost:8000/auth/sso/callback')
-    metrics_token: str = os.getenv('METRICS_TOKEN', '')
-    cors_origins: list[str] = None  # type: ignore[assignment]
-    admin_emails: list[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, 'cors_origins', _csv(os.getenv('CORS_ORIGINS', 'http://localhost:3000')))
-        object.__setattr__(self, 'admin_emails', [email.lower() for email in _csv(os.getenv('ADMIN_EMAILS', ''))])
-
-
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
