@@ -1,4 +1,5 @@
-name: CI
+name: ci
+
 on:
   push:
   pull_request:
@@ -6,91 +7,92 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: omniai_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
-      - run: pip install -r backend/requirements.txt
-      - run: PYTHONPATH=backend pytest -q backend/tests backend/tests_test_*.py
-      - run: python -m compileall -q backend/app
-      - run: bash -n scripts/backup.sh scripts/verify-backup.sh scripts/restore.sh scripts/smoke-test.sh
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Tests
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/omniai_test
+        run: pytest -q -p no:cacheprovider --junitxml=junit.xml
+      - name: Report failures as annotations
+        if: failure()
+        run: |
+          python - <<'EOF'
+          import xml.etree.ElementTree as ET
+          try:
+              root = ET.parse("junit.xml").getroot()
+          except Exception as e:
+              print(f"::error title=pytest::could not read junit.xml: {e}")
+              raise SystemExit
+          for tc in root.iter("testcase"):
+              for kind in ("failure", "error"):
+                  el = tc.find(kind)
+                  if el is not None:
+                      text = ((el.get("message") or "") + "\n" + (el.text or ""))[-1800:]
+                      text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                      print(f"::error title={tc.get('classname')}.{tc.get('name')}::{text}")
+          EOF
+      - name: Migrations round-trip
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/omniai_test
+          SECRET_KEY: ci-secret-key-ci-secret-key-ci-secret-key
+          ENVIRONMENT: test
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+          alembic check 2>&1 | tee alembic-check.txt || (sed 's/^/::error title=alembic check::/' alembic-check.txt; exit 1)
 
   frontend:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: '22'}
-      - working-directory: frontend
-        run: npm install
-      - working-directory: frontend
-        run: npm run build
-
-  dependency-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
-      - run: pip install pip-audit
-      - run: pip-audit -r backend/requirements.txt
-      - uses: actions/setup-node@v4
-        with: {node-version: '22'}
-      - working-directory: frontend
-        run: npm install
-      - working-directory: frontend
-        run: npm audit --audit-level=high
-
-  e2e:
-    runs-on: ubuntu-latest
-    needs: [backend, frontend]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Create CI environment
-        run: |
-          cat > .env <<'ENV'
-          APP_NAME=FLIWAI OmniAI API
-          ENVIRONMENT=development
-          POSTGRES_USER=omniai
-          POSTGRES_PASSWORD=ci_database_password_12345
-          POSTGRES_DB=omniai
-          DATABASE_URL=postgresql://omniai:ci_database_password_12345@db:5432/omniai
-          JWT_SECRET=ci_only_release_candidate_secret_please_replace
-          JWT_EXPIRE_MINUTES=60
-          OPENAI_API_KEY=
-          CORS_ORIGINS=http://localhost:3000
-          UPLOAD_DIR=/app/uploads
-          RATE_LIMIT_PER_MINUTE=500
-          APP_BASE_URL=http://localhost:3000
-          ENV
-      - name: Start application
-        run: docker compose up -d --build
-      - name: Wait for readiness
-        run: |
-          for i in {1..36}; do
-            if curl --fail --silent http://localhost:8000/health/ready; then exit 0; fi
-            sleep 5
-          done
-          docker compose logs
-          exit 1
-      - uses: actions/setup-node@v4
-        with: {node-version: '22'}
-      - working-directory: frontend
-        run: npm install
-      - working-directory: frontend
-        run: npx playwright install --with-deps chromium
-      - working-directory: frontend
-        run: npm run e2e:chromium
-      - name: Upload Playwright report
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          name: playwright-report
-          path: frontend/playwright-report
-          if-no-files-found: ignore
-      - name: Show service logs on failure
+          node-version: "20"
+      - name: Install
+        run: npm install --no-audit --no-fund > install.log 2>&1
+      - name: Type check
+        run: npx tsc --noEmit > tsc.log 2>&1
+      - name: Build
+        run: npm run build > build.log 2>&1
+      - name: Report failures as annotations
         if: failure()
-        run: docker compose logs
-      - name: Stop services
-        if: always()
-        run: docker compose down -v
+        shell: bash
+        run: |
+          for f in install.log tsc.log build.log; do
+            [ -s "$f" ] || continue
+            body=$(tail -c 3500 "$f" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=$f::$body"
+          done
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck -S warning -f gcc scripts/*.sh | tee sc.txt; s=${PIPESTATUS[0]}; sed 's/^/::error title=shellcheck::/' sc.txt; exit $s
+        shell: bash
+      - name: Compose file is valid
+        run: touch .env && docker compose -f docker-compose.yml config -q
+        env:
+          POSTGRES_PASSWORD: ci

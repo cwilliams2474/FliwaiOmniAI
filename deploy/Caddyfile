@@ -1,0 +1,29 @@
+# SITE_ADDRESS comes from .env:
+#   omni.example.com  -> automatic HTTPS from Let's Encrypt (DNS must point here, ports 80/443 open)
+#   :80               -> plain HTTP on any address (set COOKIE_SECURE=false)
+{$SITE_ADDRESS} {
+	encode gzip
+
+	# Uploads up to 30 MB; the backend enforces MAX_UPLOAD_MB itself.
+	request_body /api/documents* {
+		max_size 30MB
+	}
+
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			transport http {
+				read_timeout 120s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+		-Server
+	}
+}

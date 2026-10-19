@@ -1,12 +1,23 @@
 /** @type {import('next').NextConfig} */
-const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://backend:8000';
+const backend = process.env.BACKEND_URL || "http://localhost:8000";
 
 const nextConfig = {
+  output: "standalone",
+  poweredByHeader: false,
+  reactStrictMode: true,
+  // In production Caddy sends /api straight to the backend. This rewrite covers `npm run dev`.
   async rewrites() {
+    return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
+  },
+  async headers() {
     return [
       {
-        source: '/api/:path*',
-        destination: `${backendUrl}/:path*`,
+        source: "/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "same-origin" },
+        ],
       },
     ];
   },

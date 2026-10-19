@@ -1,62 +1,35 @@
 #!/usr/bin/env bash
+# Back up the database and uploaded files, with SHA-256 checksums.
+# Schedule nightly with cron, e.g.:  0 2 * * * /opt/omniai/scripts/backup.sh >> /var/log/omniai-backup.log 2>&1
 set -euo pipefail
+cd "$(dirname "$0")/.."
+# shellcheck source=/dev/null
+source <(grep -E '^(POSTGRES_USER|POSTGRES_DB|BACKUP_DIR|BACKUP_KEEP_DAYS)=' .env)
+POSTGRES_USER=${POSTGRES_USER:-omniai}
+POSTGRES_DB=${POSTGRES_DB:-omniai}
+BACKUP_DIR=${BACKUP_DIR:-./backups}
+KEEP=${BACKUP_KEEP_DAYS:-14}
 
-OUTPUT_DIR="${1:-./backups}"
-STAMP="$(date -u +%Y%m%d-%H%M%S)"
-BUNDLE="${OUTPUT_DIR%/}/omniai-backup-${STAMP}"
-UPLOADS_DIR="$BUNDLE/uploads"
-DB_FILE="$BUNDLE/database.sql"
-MANIFEST_FILE="$BUNDLE/manifest.json"
+stamp=$(date +%Y%m%d-%H%M%S)
+dest="$BACKUP_DIR/$stamp"
+mkdir -p "$dest"
+chmod 700 "$BACKUP_DIR" "$dest"
 
-mkdir -p "$UPLOADS_DIR"
+echo "[$(date -Is)] Dumping database to $dest/database.dump"
+docker compose exec -T db pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner > "$dest/database.dump"
 
-echo "Backing up PostgreSQL..."
-docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$DB_FILE"
-if [[ ! -s "$DB_FILE" ]]; then
-  echo "Database backup is empty" >&2
-  exit 1
-fi
+echo "[$(date -Is)] Archiving uploaded files to $dest/uploads.tar.gz"
+docker compose exec -T backend tar -czf - -C /data uploads > "$dest/uploads.tar.gz"
 
-echo "Backing up uploaded files..."
-docker compose exec -T backend sh -c 'cd /app/uploads && tar -cf - .' | tar -xf - -C "$UPLOADS_DIR"
+git_rev=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+migration=$(docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "select version_num from alembic_version" 2>/dev/null || echo "unknown")
+printf 'created=%s\nmigration=%s\ncode=%s\n' "$(date -Is)" "$migration" "$git_rev" > "$dest/MANIFEST"
 
-python3 - "$DB_FILE" "$UPLOADS_DIR" "$MANIFEST_FILE" <<'PY'
-import hashlib
-import json
-import os
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
+(cd "$dest" && sha256sum database.dump uploads.tar.gz MANIFEST > SHA256SUMS)
 
+# Quick self-check so a broken backup is noticed now, not during a restore.
+"$(dirname "$0")/verify-backup.sh" "$dest" >/dev/null
+echo "[$(date -Is)] Backup complete and verified: $dest ($(du -sh "$dest" | cut -f1))"
 
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open('rb') as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-db_file = Path(sys.argv[1])
-uploads_dir = Path(sys.argv[2])
-manifest_file = Path(sys.argv[3])
-items = []
-for path in sorted(p for p in uploads_dir.rglob('*') if p.is_file()):
-    items.append({
-        'path': path.relative_to(uploads_dir).as_posix(),
-        'sha256': sha256(path),
-        'bytes': path.stat().st_size,
-    })
-manifest = {
-    'format_version': 1,
-    'created_at': datetime.now(timezone.utc).isoformat(),
-    'database_file': db_file.name,
-    'database_sha256': sha256(db_file),
-    'uploads_directory': uploads_dir.name,
-    'uploads': items,
-}
-manifest_file.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-PY
-
-echo "Backup complete: $BUNDLE"
-echo "Verify it with: ./scripts/verify-backup.sh '$BUNDLE'"
+# Retention: remove backup folders older than KEEP days.
+find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name '20*' -mtime +"$KEEP" -print -exec rm -rf {} + || true

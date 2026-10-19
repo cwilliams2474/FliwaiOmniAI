@@ -1,134 +1,93 @@
-import ipaddress
+"""Outbound integrations: Slack, Microsoft Teams and generic webhooks.
+
+Secrets (webhook URLs, auth header values) are stored encrypted with ENCRYPTION_KEY and are
+never returned by the API; only a short hint such as "…/T0ab" is shown.
+"""
+
 import json
-import socket
-from typing import Any
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import httpx
 
-from app.crypto_utils import decrypt_secret
-from app.models.core import IntegrationConnection
+from app.models import Integration
+from app.security import decrypt, encrypt
 
-PROVIDERS = {
-    'github': {'label': 'GitHub', 'actions': ['create_issue']},
-    'google': {'label': 'Google Workspace', 'actions': ['send_email', 'create_calendar_event']},
-    'microsoft': {'label': 'Microsoft 365', 'actions': ['send_email', 'create_calendar_event']},
-    'webhook': {'label': 'Webhook', 'actions': ['post']},
+KINDS = {
+    "slack": {"label": "Slack incoming webhook", "secret_fields": ["webhook_url"], "config_fields": []},
+    "teams": {"label": "Microsoft Teams webhook (Workflows)", "secret_fields": ["webhook_url"], "config_fields": []},
+    "webhook": {"label": "Generic HTTPS webhook (JSON POST)", "secret_fields": ["url", "auth_header_value"], "config_fields": ["auth_header_name"]},
 }
 
 
+class IntegrationError(Exception):
+    pass
 
-def validate_webhook_url(url: str) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme != 'https':
-        raise ValueError('Webhook URL must use https')
-    host = parsed.hostname
-    if not host:
-        raise ValueError('Webhook URL must include a hostname')
-    if host.lower() in {'localhost', 'localhost.localdomain'}:
-        raise ValueError('Webhook URL cannot target localhost')
+
+def validate_url(url: str) -> str:
+    p = urlparse(url.strip())
+    if p.scheme not in ("https", "http") or not p.netloc:
+        raise IntegrationError("Enter a full http(s):// URL.")
+    return url.strip()
+
+
+def hint_for(url: str) -> str:
+    p = urlparse(url)
+    tail = (p.path or "")[-4:]
+    return f"{p.netloc}/…{tail}" if p.netloc else "set"
+
+
+def seal(secrets: dict) -> str:
+    return encrypt(json.dumps(secrets))
+
+
+def unseal(integ: Integration) -> dict:
+    raw = decrypt(integ.secret_enc or "")
+    if raw is None:
+        raise IntegrationError("The stored secret can't be decrypted. Was ENCRYPTION_KEY changed? Re-enter the secret.")
+    return json.loads(raw)
+
+
+def _payload(kind: str, text: str, org_name: str) -> dict:
+    if kind == "slack":
+        return {"text": text}
+    if kind == "teams":
+        return {
+            "type": "message",
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.4",
+                        "body": [{"type": "TextBlock", "text": text, "wrap": True}],
+                    },
+                }
+            ],
+        }
+    return {"text": text, "organization": org_name, "source": "omniai", "sent_at": datetime.now(timezone.utc).isoformat()}
+
+
+def send(integ: Integration, text: str, org_name: str, timeout: float = 15.0) -> dict:
+    """Send a message. Updates last_used/last_ok/last_error on the object (caller commits)."""
+    if not integ.enabled:
+        raise IntegrationError(f"Integration '{integ.name}' is turned off.")
+    secrets = unseal(integ)
+    url = secrets.get("webhook_url") or secrets.get("url")
+    if not url:
+        raise IntegrationError(f"Integration '{integ.name}' has no URL set.")
+    headers = {"Content-Type": "application/json", "User-Agent": "OmniAI/3.1"}
+    if integ.kind == "webhook" and secrets.get("auth_header_value"):
+        headers[(integ.config or {}).get("auth_header_name") or "Authorization"] = secrets["auth_header_value"]
+    integ.last_used_at = datetime.now(timezone.utc)
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError('Webhook hostname could not be resolved') from exc
-    for address in addresses:
-        ip = ipaddress.ip_address(address)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-            raise ValueError('Webhook URL cannot target private or special-use networks')
-    return url
-
-def public_connection(row: IntegrationConnection) -> dict[str, Any]:
-    config = json.loads(row.config_json or '{}')
-    return {
-        'id': row.id, 'provider': row.provider, 'name': row.name, 'config': config,
-        'enabled': row.enabled, 'has_secret': bool(row.secret_encrypted),
-        'actions': PROVIDERS.get(row.provider, {}).get('actions', []),
-        'created_at': row.created_at, 'updated_at': row.updated_at,
-    }
-
-
-def _secret(row: IntegrationConnection) -> str:
-    return decrypt_secret(row.secret_encrypted)
-
-
-def execute_integration_action(row: IntegrationConnection, action: str, params: dict[str, Any]) -> dict[str, Any]:
-    if not row.enabled:
-        raise ValueError('Integration is disabled')
-    if action not in PROVIDERS.get(row.provider, {}).get('actions', []):
-        raise ValueError(f'Unsupported {row.provider} action: {action}')
-    token = _secret(row)
-    config = json.loads(row.config_json or '{}')
-    timeout = 15.0
-
-    if row.provider == 'github' and action == 'create_issue':
-        repo = str(params.get('repo') or config.get('repo') or '')
-        if '/' not in repo:
-            raise ValueError('GitHub repo must be owner/name')
-        if not token:
-            raise ValueError('GitHub token is not configured')
-        payload = {'title': str(params.get('title') or 'OmniAI issue')[:256], 'body': str(params.get('body') or '')[:60000]}
-        r = httpx.post(f'https://api.github.com/repos/{repo}/issues', headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'}, json=payload, timeout=timeout)
-        r.raise_for_status(); data = r.json()
-        return {'provider': 'github', 'action': action, 'id': data.get('id'), 'number': data.get('number'), 'url': data.get('html_url')}
-
-    if row.provider == 'google' and action == 'send_email':
-        # Gmail API requires RFC 2822 base64url content; callers provide a prepared raw value.
-        raw = str(params.get('raw') or '')
-        if not token or not raw:
-            raise ValueError('Google access token and raw message are required')
-        r = httpx.post('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', headers={'Authorization': f'Bearer {token}'}, json={'raw': raw}, timeout=timeout)
-        r.raise_for_status(); data = r.json(); return {'provider': 'google', 'action': action, 'id': data.get('id')}
-
-    if row.provider == 'google' and action == 'create_calendar_event':
-        if not token:
-            raise ValueError('Google access token is not configured')
-        calendar_id = str(params.get('calendar_id') or config.get('calendar_id') or 'primary')
-        event = params.get('event') or {}
-        r = httpx.post(f'https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events', headers={'Authorization': f'Bearer {token}'}, json=event, timeout=timeout)
-        r.raise_for_status(); data=r.json(); return {'provider':'google','action':action,'id':data.get('id'),'url':data.get('htmlLink')}
-
-    if row.provider == 'microsoft' and action == 'send_email':
-        if not token:
-            raise ValueError('Microsoft Graph access token is not configured')
-        message = params.get('message') or {}
-        r = httpx.post('https://graph.microsoft.com/v1.0/me/sendMail', headers={'Authorization': f'Bearer {token}'}, json={'message': message, 'saveToSentItems': True}, timeout=timeout)
-        r.raise_for_status(); return {'provider':'microsoft','action':action,'status':'sent'}
-
-    if row.provider == 'microsoft' and action == 'create_calendar_event':
-        if not token:
-            raise ValueError('Microsoft Graph access token is not configured')
-        event = params.get('event') or {}
-        r = httpx.post('https://graph.microsoft.com/v1.0/me/events', headers={'Authorization': f'Bearer {token}'}, json=event, timeout=timeout)
-        r.raise_for_status(); data=r.json(); return {'provider':'microsoft','action':action,'id':data.get('id'),'url':data.get('webLink')}
-
-    if row.provider == 'webhook' and action == 'post':
-        url = str(params.get('url') or config.get('url') or '')
-        validate_webhook_url(url)
-        headers = {'Content-Type': 'application/json'}
-        if token:
-            headers['Authorization'] = f'Bearer {token}'
-        payload = params.get('payload') or {}
-        r = httpx.post(url, headers=headers, json=payload, timeout=timeout)
-        r.raise_for_status(); return {'provider':'webhook','action':action,'status_code':r.status_code}
-
-    raise ValueError('Integration action was not handled')
-
-
-def test_connection(row: IntegrationConnection) -> dict[str, Any]:
-    token = _secret(row)
-    config = json.loads(row.config_json or '{}')
-    if row.provider == 'github':
-        if not token: raise ValueError('GitHub token is not configured')
-        r=httpx.get('https://api.github.com/user', headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json'}, timeout=10.0); r.raise_for_status(); data=r.json()
-        return {'ok': True, 'identity': data.get('login')}
-    if row.provider == 'google':
-        if not token: raise ValueError('Google access token is not configured')
-        r=httpx.get('https://www.googleapis.com/oauth2/v3/userinfo', headers={'Authorization':f'Bearer {token}'}, timeout=10.0); r.raise_for_status(); data=r.json()
-        return {'ok': True, 'identity': data.get('email') or data.get('sub')}
-    if row.provider == 'microsoft':
-        if not token: raise ValueError('Microsoft Graph access token is not configured')
-        r=httpx.get('https://graph.microsoft.com/v1.0/me?$select=displayName,userPrincipalName', headers={'Authorization':f'Bearer {token}'}, timeout=10.0); r.raise_for_status(); data=r.json()
-        return {'ok': True, 'identity': data.get('userPrincipalName') or data.get('displayName')}
-    if row.provider == 'webhook':
-        return {'ok': bool(config.get('url')), 'identity': config.get('url', '')}
-    raise ValueError('Unknown provider')
+        r = httpx.post(url, json=_payload(integ.kind, text[:12000], org_name), headers=headers, timeout=timeout)
+    except httpx.HTTPError as e:
+        integ.last_ok, integ.last_error = False, f"Couldn't connect: {e.__class__.__name__}"
+        raise IntegrationError(f"{integ.name}: {integ.last_error}")
+    if r.status_code >= 400:
+        integ.last_ok, integ.last_error = False, f"HTTP {r.status_code}: {r.text[:200]}"
+        raise IntegrationError(f"{integ.name} rejected the message ({integ.last_error}).")
+    integ.last_ok, integ.last_error = True, ""
+    return {"status_code": r.status_code}
