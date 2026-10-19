@@ -4,7 +4,7 @@ from tests.conftest import PASSWORD, add_member, new_client, totp_now
 def test_first_run_setup_only_once(owner):
     c = new_client()
     assert c.get("/api/auth/status").json()["needs_setup"] is False
-    r = c.post("/api/auth/setup", json={"org_name": "X", "name": "Y", "email": "y@example.com", "password": PASSWORD})
+    r = c.post("/api/auth/setup", json={"org_name": "Second Org", "name": "Y", "email": "y@example.com", "password": PASSWORD})
     assert r.status_code == 409
 
 

@@ -33,7 +33,7 @@ fi
 docker compose build
 docker compose up -d
 echo "Waiting for the backend to become healthy..."
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   if docker compose exec -T backend curl -fsS http://localhost:8000/api/health >/dev/null 2>&1; then
     url=$(grep '^PUBLIC_URL=' .env | cut -d= -f2-)
     echo "OmniAI is running. Open ${url}/setup to create the first organization and owner account."

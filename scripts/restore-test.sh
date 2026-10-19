@@ -26,7 +26,7 @@ scripts/verify-backup.sh "$dir"
 echo "Starting isolated database container $name (no published ports)..."
 docker network create --internal "$net" >/dev/null
 docker run -d --name "$name" --network "$net" -e POSTGRES_PASSWORD=restoretest -e POSTGRES_USER=omniai -e POSTGRES_DB=omniai postgres:16-alpine >/dev/null
-for i in $(seq 1 30); do docker exec "$name" pg_isready -U omniai -d omniai >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 30); do docker exec "$name" pg_isready -U omniai -d omniai >/dev/null 2>&1 && break; sleep 1; done
 
 echo "Restoring database..."
 docker exec -i "$name" pg_restore -U omniai -d omniai --no-owner --exit-on-error < "$dir/database.dump"

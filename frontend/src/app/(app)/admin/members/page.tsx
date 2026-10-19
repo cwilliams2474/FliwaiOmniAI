@@ -71,7 +71,7 @@ export default function MembersPage() {
                   <td className="mono">{m.email}</td>
                   <td>
                     <select aria-label={`Role for ${m.name}`} value={m.role} disabled={locked} className="inline"
-                      onChange={(e) => act(() => api(`/orgs/current/members/${m.user_id}`, { method: "PATCH", body: { role: e.target.value } }).then(() => self && refresh()), `${m.name} is now ${e.target.value}`)}>
+                      onChange={(e) => act(() => api(`/orgs/current/members/${m.user_id}`, { method: "PATCH", body: { role: e.target.value } }).then(() => { if (self) return refresh(); }), `${m.name} is now ${e.target.value}`)}>
                       {(locked ? ROLES : roles).map((r) => <option key={r} value={r}>{r}</option>)}
                     </select>
                   </td>

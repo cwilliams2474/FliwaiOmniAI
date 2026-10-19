@@ -7,6 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 dir=${1:?Usage: restore-production.sh <backup-folder>}
+# shellcheck source=/dev/null
 source <(grep -E '^(POSTGRES_USER|POSTGRES_DB|BACKUP_DIR)=' .env)
 POSTGRES_USER=${POSTGRES_USER:-omniai}
 POSTGRES_DB=${POSTGRES_DB:-omniai}
@@ -40,7 +41,7 @@ docker compose run --rm -T --no-deps --entrypoint sh backend -c 'rm -rf /data/up
 
 echo "Starting the app..."
 docker compose up -d
-for i in $(seq 1 40); do
+for _ in $(seq 1 40); do
   if docker compose exec -T backend curl -fsS http://localhost:8000/api/health >/dev/null 2>&1; then
     echo "DONE: production restored from $dir and healthy."
     exit 0

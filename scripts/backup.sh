@@ -3,6 +3,7 @@
 # Schedule nightly with cron, e.g.:  0 2 * * * /opt/omniai/scripts/backup.sh >> /var/log/omniai-backup.log 2>&1
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=/dev/null
 source <(grep -E '^(POSTGRES_USER|POSTGRES_DB|BACKUP_DIR|BACKUP_KEEP_DAYS)=' .env)
 POSTGRES_USER=${POSTGRES_USER:-omniai}
 POSTGRES_DB=${POSTGRES_DB:-omniai}

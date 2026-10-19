@@ -20,8 +20,8 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -65,8 +65,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
       - run: npm install --no-audit --no-fund
@@ -80,8 +80,11 @@ jobs:
   scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: shellcheck -S warning scripts/*.sh
-      - run: docker compose -f docker-compose.yml config -q
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck -S warning -f gcc scripts/*.sh | tee sc.txt; s=${PIPESTATUS[0]}; sed 's/^/::error title=shellcheck::/' sc.txt; exit $s
+        shell: bash
+      - name: Compose file is valid
+        run: touch .env && docker compose -f docker-compose.yml config -q
         env:
           POSTGRES_PASSWORD: ci
